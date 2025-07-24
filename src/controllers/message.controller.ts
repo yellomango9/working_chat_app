@@ -241,16 +241,25 @@ export const sendMessage = asyncHandler(
             }
           });
         } else {
-          // Fallback: emit to all connected sockets if room is not available
-          console.log(`⚠️ Room ${chatId} not found, using fallback broadcast`);
-          if (io.sockets && io.sockets.sockets) {
-            io.sockets.sockets.forEach((socket: any) => {
-              if (socket.user && socket.user._id.toString() !== currentUserId.toString()) {
-                socket.emit(ChatEventEnum.MESSAGE_RECEIVED_EVENT, structuredMessage[0]);
-                console.log(`📡 Sent message to socket ${socket.id} (user: ${socket.user._id}) via fallback`);
-              }
-            });
-          }
+          // FIXED: Instead of broadcasting to all users, only send to chat participants
+          console.log(`⚠️ Room ${chatId} not found, sending to chat participants only`);
+          updatedChat.participants.forEach((participantId: Types.ObjectId) => {
+            const participantIdStr = participantId.toString();
+            
+            // Skip the message sender
+            if (participantIdStr === currentUserId.toString()) {
+              return;
+            }
+            
+            // Send message directly to each participant
+            emitToUser(
+              req,
+              participantIdStr,
+              ChatEventEnum.MESSAGE_RECEIVED_EVENT,
+              structuredMessage[0]
+            );
+            console.log(`📡 Sent message directly to participant: ${participantIdStr}`);
+          });
         }
       }
       

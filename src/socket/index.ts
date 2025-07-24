@@ -12,6 +12,8 @@ import colorsUtils from "../helpers/colorsUtils";
 import { Types } from "mongoose";
 import MessageStatusService from "../services/messageStatusService";
 import DefaultGroupService from "../services/defaultGroupService";
+import { ImprovedMessageStatusService } from "../services/improvedMessageStatusService";
+import { AutoDeliveryService } from "../services/autoDeliveryService";
 
 declare module "socket.io" {
   interface Socket {
@@ -20,11 +22,42 @@ declare module "socket.io" {
 }
 
 // handles the join chat event ie; when a user join a room
-const mountJoinChatEvent = (socket: Socket): void => {
-  socket.on(ChatEventEnum.JOIN_CHAT_EVENT, (chatId: string) => {
-    colorsUtils.log("info", `👥 User ${socket.user?._id} manually joining chat room: ${chatId}`);
-    socket.join(chatId); // join the user to a chat between or group chat
-    colorsUtils.log("info", `✅ User ${socket.user?._id} successfully joined chat room: ${chatId}`);
+const mountJoinChatEvent = (socket: Socket, io: any): void => {
+  socket.on(ChatEventEnum.JOIN_CHAT_EVENT, async (chatId: string) => {
+    try {
+      colorsUtils.log("info", `👥 User ${socket.user?._id} manually joining chat room: ${chatId}`);
+      socket.join(chatId); // join the user to a chat between or group chat
+      
+      // Auto-mark messages as delivered when joining a chat
+      if (socket.user?._id) {
+        try {
+          const req = { app: { get: () => io } } as any;
+          await AutoDeliveryService.markChatMessagesAsDelivered(
+            req,
+            socket.user._id.toString(),
+            chatId
+          );
+        } catch (error) {
+          colorsUtils.log("error", `Error in chat auto-delivery: ${error}`);
+        }
+      }
+      
+      colorsUtils.log("info", `✅ User ${socket.user?._id} successfully joined chat room: ${chatId}`);
+      
+      // Send confirmation to the user
+      socket.emit('chatJoined', {
+        chatId,
+        success: true,
+        timestamp: new Date().toISOString()
+      });
+    } catch (error) {
+      colorsUtils.log("error", `Error joining chat: ${error}`);
+      socket.emit('chatJoinError', {
+        chatId,
+        error: 'Failed to join chat',
+        timestamp: new Date().toISOString()
+      });
+    }
   });
 };
 
@@ -127,9 +160,9 @@ const mountMessageReadEvent = (socket: Socket, io: any): void => {
       colorsUtils.log("info", `📖 Message read event. Data: ${JSON.stringify(messageData)}`);
       
       if (messageData && messageData.messageId && socket.user?._id) {
-        // Use the new message status service
+        // Use the improved message status service
         const req = { app: { get: () => io } } as any;
-        await MessageStatusService.markAsRead(
+        await ImprovedMessageStatusService.markAsRead(
           req,
           messageData.messageId,
           socket.user._id.toString()
@@ -156,7 +189,7 @@ const mountMessageDeliveredEvent = (socket: Socket, io: any): void => {
       colorsUtils.log("info", `📬 Message delivered event: ${data.messageId}`);
       
       const req = { app: { get: () => io } } as any;
-      await MessageStatusService.markAsDelivered(
+      await ImprovedMessageStatusService.markAsDelivered(
         req,
         data.messageId,
         socket.user._id.toString()
@@ -248,19 +281,48 @@ const initSocketIo = (io: any): void => {
       socket.join(user._id.toString());
       colorsUtils.log("info", `👤 User ${user.username} (${user._id}) joined personal room`);
       
-      // Auto-join user to all their chats
+      // Update user status to online and broadcast
+      await userRepo.findByIdAndUpdate(userId, { 
+        status: true, 
+        lastSeen: new Date() 
+      });
+      
+      // Auto-join user to all their chats FIRST
       await autoJoinUserChats(socket, userId);
+      
+      // Auto-mark pending messages as delivered
+      try {
+        const req = { app: { get: () => io } } as any;
+        await AutoDeliveryService.markPendingMessagesAsDelivered(req, userId.toString());
+      } catch (error) {
+        colorsUtils.log("error", `Error in auto-delivery: ${error}`);
+      }
+      
+      // Broadcast user online status to all connected users
+      const onlineStatusData = {
+        userId: user._id.toString(),
+        username: user.username,
+        status: true,
+        lastSeen: new Date(),
+        timestamp: new Date().toISOString(),
+      };
+      
+      socket.broadcast.emit(ChatEventEnum.USER_ONLINE, onlineStatusData);
+      socket.broadcast.emit(ChatEventEnum.USER_STATUS_UPDATE, onlineStatusData);
       
       // Send connection confirmation with user data
       socket.emit(ChatEventEnum.CONNECTED_EVENT, {
         userId: user._id.toString(),
         username: user.username,
-        message: "Connected successfully"
+        status: true,
+        message: "Connected successfully",
+        timestamp: new Date().toISOString()
       });
+      
       colorsUtils.log("info", `🤝 User connected successfully: ${user.username} (${user._id.toString()})`);
 
       // Mount event handlers
-      mountJoinChatEvent(socket);
+      mountJoinChatEvent(socket, io);
       mountJoinUserGroupsEvent(socket);
       mountStartTypingEvent(socket);
       mountStopTypingEvent(socket);
@@ -280,10 +342,31 @@ const initSocketIo = (io: any): void => {
       });
 
       // Handle disconnection
-      socket.on("disconnect", () => {
-        colorsUtils.log("info", `User disconnected: ${socket.user?._id}`);
+      socket.on("disconnect", async (reason) => {
+        colorsUtils.log("info", `User disconnected: ${socket.user?._id} (reason: ${reason})`);
         if (socket.user?._id) {
+          // Update user status to offline and broadcast
+          await userRepo.findByIdAndUpdate(socket.user._id, { 
+            status: false, 
+            lastSeen: new Date() 
+          });
+          
+          // Prepare offline status data
+          const offlineStatusData = {
+            userId: socket.user._id.toString(),
+            username: socket.user.username,
+            status: false,
+            lastSeen: new Date(),
+            timestamp: new Date().toISOString(),
+          };
+          
+          // Broadcast user offline status
+          socket.broadcast.emit(ChatEventEnum.USER_OFFLINE, offlineStatusData);
+          socket.broadcast.emit(ChatEventEnum.USER_STATUS_UPDATE, offlineStatusData);
+          
+          // Leave personal room
           socket.leave(socket.user._id.toString());
+          colorsUtils.log("info", `📡 Broadcasted offline status for user: ${socket.user.username}`);
         }
       });
 

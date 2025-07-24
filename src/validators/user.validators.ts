@@ -75,4 +75,18 @@ const changePasswordValidator = (): any => {
   ];
 };
 
-export { userRegisterValidator, userLoginValidator, userProfileUpdateValidator, changePasswordValidator };
+const userStatusUpdateValidator = (): any => {
+  return [
+    body("status")
+      .isBoolean()
+      .withMessage("status must be a boolean value"),
+    
+    body("statusMessage")
+      .optional()
+      .trim()
+      .isLength({ max: 100 })
+      .withMessage("status message must not exceed 100 characters"),
+  ];
+};
+
+export { userRegisterValidator, userLoginValidator, userProfileUpdateValidator, changePasswordValidator, userStatusUpdateValidator };

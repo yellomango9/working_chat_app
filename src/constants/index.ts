@@ -19,4 +19,7 @@ export enum ChatEventEnum {
   NOTIFICATION_EVENT = "notification",
   CONVERSATION_UPDATED = "conversationUpdated",
   CONVERSATION_READ = "conversationRead",
+  USER_STATUS_UPDATE = "userStatusUpdate",
+  USER_ONLINE = "userOnline",
+  USER_OFFLINE = "userOffline",
 }

@@ -1,10 +1,11 @@
 import express, { Request, Response, NextFunction } from "express";
-import { login, logout, signUp, refreshToken, updateProfile, updateAvatar, changePassword, getCurrentUser } from "../controllers/user.controller";
+import { login, logout, signUp, refreshToken, updateProfile, updateAvatar, changePassword, getCurrentUser, updateUserStatus } from "../controllers/user.controller";
 import {
   userLoginValidator,
   userRegisterValidator,
   userProfileUpdateValidator,
   changePasswordValidator,
+  userStatusUpdateValidator,
 } from "../validators/user.validators";
 import { validate } from "../validators/validate";
 import { verifyJWT } from "../middlewares/auth.middlewares";
@@ -23,5 +24,6 @@ router.get("/profile", getCurrentUser);
 router.put("/profile", userProfileUpdateValidator(), validate, updateProfile);
 router.post("/avatar", upload.single("avatar"), updateAvatar);
 router.post("/change-password", changePasswordValidator(), validate, changePassword);
+router.put("/status", userStatusUpdateValidator(), validate, updateUserStatus);
 
 export default router;

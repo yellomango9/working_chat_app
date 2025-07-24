@@ -122,7 +122,7 @@ export class MessageStatusService {
     userId: string
   ): Promise<void> {
     try {
-      const message = await MessageModel.findById(messageId);
+      const message = await MessageModel.findById(messageId).populate('chat');
       if (!message) {
         colorsUtils.log("error", `Message not found for markAsDelivered: ${messageId}`);
         return;
@@ -134,51 +134,67 @@ export class MessageStatusService {
         return;
       }
 
-      colorsUtils.log("info", `📦 Marking message as delivered: ${messageId} to user: ${userId}`);
-
-      // Add user to deliveredTo array if not already present
-      const updated = await MessageModel.findByIdAndUpdate(
-        messageId,
-        { 
-          $addToSet: { deliveredTo: new Types.ObjectId(userId) },
-          $set: { 
-            deliveredAt: new Date(),
-            updatedAt: new Date()
-          }
-        },
-        { new: true }
-      ).populate('deliveredTo', 'username');
-
-      if (!updated) return;
-
-      // Check if message should be marked as delivered to all recipients
-      const chatMessage = await MessageModel.findById(messageId);
-      if (chatMessage) {
-        // Logic to determine if all recipients have received the message
-        // This would depend on your chat participant logic
-        const shouldUpdateStatus = this.shouldUpdateToDelivered(updated, chatMessage.chat);
-        
-        if (shouldUpdateStatus && updated.status !== MessageStatus.DELIVERED) {
-          await this.updateMessageStatus(req, messageId, MessageStatus.DELIVERED);
-        }
+      // Check if user is already in deliveredTo array
+      const isAlreadyDelivered = message.deliveredTo.some(id => id.toString() === userId);
+      if (isAlreadyDelivered) {
+        colorsUtils.log("info", `Message already delivered to user: ${messageId} -> ${userId}`);
+        return;
       }
 
-      // Emit delivery confirmation
-      emitSocketEvent(req, message.chat.toString(), ChatEventEnum.MESSAGE_DELIVERED_EVENT, {
+      colorsUtils.log("info", `📦 Marking message as delivered: ${messageId} to user: ${userId}`);
+
+      // Add user to deliveredTo array and update status if needed
+      const updateData: any = {
+        $addToSet: { deliveredTo: new Types.ObjectId(userId) },
+        $set: { 
+          deliveredAt: new Date(),
+          updatedAt: new Date()
+        }
+      };
+
+      // If message is still pending/sending, update to delivered
+      if (message.status === MessageStatus.PENDING || message.status === MessageStatus.SENDING) {
+        updateData.$set.status = MessageStatus.DELIVERED;
+      }
+
+      const updated = await MessageModel.findByIdAndUpdate(
+        messageId,
+        updateData,
+        { new: true }
+      ).populate('deliveredTo', 'username')
+       .populate('sender', 'username');
+
+      if (!updated) {
+        colorsUtils.log("error", `Failed to update message delivery: ${messageId}`);
+        return;
+      }
+
+      // Emit delivery confirmation to chat room
+      const deliveryData = {
         messageId,
         deliveredTo: userId,
         deliveredAt: updated.deliveredAt,
-        allDeliveredTo: updated.deliveredTo,
+        allDeliveredTo: updated.deliveredTo.map((user: any) => ({
+          _id: user._id,
+          username: user.username
+        })),
+        status: updated.status,
         timestamp: new Date().toISOString(),
-      });
+      };
 
-      // Also emit status update to ensure UI updates
-      emitSocketEvent(req, message.chat.toString(), ChatEventEnum.MESSAGE_STATUS_UPDATE_EVENT, {
+      // Emit to chat room
+      emitSocketEvent(req, message.chat.toString(), ChatEventEnum.MESSAGE_DELIVERED_EVENT, deliveryData);
+
+      // Emit status update to sender specifically
+      emitToUser(req, message.sender.toString(), ChatEventEnum.MESSAGE_STATUS_UPDATE_EVENT, {
         messageId,
-        status: MessageStatus.DELIVERED,
+        status: updated.status,
         chatId: message.chat.toString(),
         deliveredAt: updated.deliveredAt,
-        deliveredTo: updated.deliveredTo,
+        deliveredTo: updated.deliveredTo.map((user: any) => ({
+          _id: user._id,
+          username: user.username
+        })),
         timestamp: new Date().toISOString(),
       });
 
@@ -233,7 +249,7 @@ export class MessageStatusService {
 
       colorsUtils.log("info", `✅ Message marked as read successfully: ${messageId}`);
 
-      // Emit read confirmation to the chat
+      // Emit read confirmation to the chat room
       emitSocketEvent(req, message.chat.toString(), ChatEventEnum.MESSAGE_READ_EVENT, {
         messageId,
         readBy: userId,
@@ -242,7 +258,7 @@ export class MessageStatusService {
         timestamp: new Date().toISOString(),
       });
 
-      // Also emit status update to ensure UI updates
+      // Also emit status update to ensure UI updates in chat room
       emitSocketEvent(req, message.chat.toString(), ChatEventEnum.MESSAGE_STATUS_UPDATE_EVENT, {
         messageId,
         status: MessageStatus.READ,
@@ -252,8 +268,8 @@ export class MessageStatusService {
         timestamp: new Date().toISOString(),
       });
 
-      // Emit directly to message sender for immediate update
-      emitSocketEvent(req, message.sender.toString(), ChatEventEnum.MESSAGE_STATUS_UPDATE_EVENT, {
+      // FIXED: Emit directly to message sender for immediate update using emitToUser
+      emitToUser(req, message.sender.toString(), ChatEventEnum.MESSAGE_STATUS_UPDATE_EVENT, {
         messageId,
         status: MessageStatus.READ,
         chatId: message.chat.toString(),
@@ -261,6 +277,8 @@ export class MessageStatusService {
         readBy: updated.readBy,
         timestamp: new Date().toISOString(),
       });
+
+      colorsUtils.log("info", `✅ Read status events emitted for message: ${messageId}`);
 
     } catch (error) {
       colorsUtils.log("error", `Error marking message as read: ${error}`);

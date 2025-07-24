@@ -15,6 +15,8 @@ import path from "path";
 import { ProtectedRequest } from "../types/app-request";
 import JWT from "../core/JWT";
 import DefaultGroupService from "../services/defaultGroupService";
+import { emitSocketEvent, emitToUser } from "../socket";
+import { ChatEventEnum } from "../constants";
 
 const signUp = asyncHandler(async (req: Request, res: Response) => {
   const { email, username, password } = req.body;
@@ -314,4 +316,66 @@ const getCurrentUser = asyncHandler(async (req: ProtectedRequest, res: Response)
   new SuccessResponse("User profile retrieved successfully", userData).send(res);
 });
 
-export { signUp, login, logout, refreshToken, updateProfile, updateAvatar, changePassword, getCurrentUser };
+const updateUserStatus = asyncHandler(async (req: ProtectedRequest, res: Response) => {
+  const userId = req.user._id;
+  const { status, statusMessage } = req.body;
+
+  // Validate status
+  if (typeof status !== 'boolean') {
+    throw new BadRequestError('Status must be a boolean value');
+  }
+
+  const updateData: Partial<User> = {
+    status,
+    lastSeen: new Date(),
+  };
+
+  // Update status message if provided
+  if (statusMessage !== undefined) {
+    updateData.statusMessage = statusMessage;
+  }
+
+  // Update user status
+  const updatedUser = await userRepo.findByIdAndUpdate(userId, updateData);
+  if (!updatedUser) {
+    throw new NotFoundError('User not found');
+  }
+
+  // Prepare status update data
+  const statusUpdateData = {
+    userId: userId.toString(),
+    username: updatedUser.username,
+    status: status,
+    statusMessage: statusMessage || updatedUser.statusMessage,
+    lastSeen: updateData.lastSeen,
+    timestamp: new Date().toISOString(),
+  };
+
+  // Emit status update event
+  const eventType = status ? ChatEventEnum.USER_ONLINE : ChatEventEnum.USER_OFFLINE;
+  
+  // Get socket.io instance and broadcast more efficiently
+  const io = req.app.get("io") as any;
+  if (io && io.sockets) {
+    // Broadcast to all connected sockets except the user themselves
+    io.sockets.emit(ChatEventEnum.USER_STATUS_UPDATE, statusUpdateData);
+    io.sockets.emit(eventType, statusUpdateData);
+    
+    // Also emit to user's personal room for confirmation
+    emitSocketEvent(req, userId.toString(), ChatEventEnum.USER_STATUS_UPDATE, {
+      ...statusUpdateData,
+      self: true // Mark as self-update
+    });
+    
+    console.log(`📡 Broadcasted ${eventType} for user: ${updatedUser.username}`);
+  }
+
+  const userData = await filterUserData(updatedUser);
+  new SuccessResponse('User status updated successfully', { 
+    user: userData,
+    status: status,
+    statusMessage: statusMessage || updatedUser.statusMessage
+  }).send(res);
+});
+
+export { signUp, login, logout, refreshToken, updateProfile, updateAvatar, changePassword, getCurrentUser, updateUserStatus };
